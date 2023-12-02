@@ -16,6 +16,9 @@ class Replica:
 
         self.state = FOLLOWER
         
+        self.log = []
+        self.unconfirmed_put = {}
+        self.confirmed_puts = set([self.id])
         self.kvstore = {}
         self.unprocessed_msgs = []
         self.leader = "FFFF"
@@ -86,28 +89,26 @@ class Replica:
             msg = self.unprocessed_msgs.pop(0)
 
             if msg["type"] in ["get", "put"]:
-                if self.leader == "FFFF":
-                    backlog.append(msg)
-                else:
+                if not self.leader == "FFFF":
                     response = self.init_msg(msg["src"], "redirect")
                     response["MID"] = msg["MID"]
                     self.send(response)
-                    continue
+                else:
+                    backlog.append(msg)
 
             elif msg["type"] == "request_vote":
-                if msg["current_term"] >= self.current_term:
+                if msg["term"] >= self.current_term:
                     if not self.voted:
                         # self.leader = "FFFF"
-                        self.current_term = msg["current_term"]
+                        self.current_term = msg["term"]
                         response = self.init_msg(msg["src"], "vote")
-                        response["current_term"] = self.current_term
+                        response["term"] = self.current_term
 
                         self.voted = True
                         self.latest_update = curr_time
                         self.timeout = self.new_timeout()
 
                         self.send(response)
-                        continue
                     # already voted, send a vote denial
                     else:
                         pass
@@ -117,12 +118,25 @@ class Replica:
                 
             
             elif msg["type"] == "append_entry":
-                # if the new leader has a up-to-date term, change leadership
-                if msg["current_term"] >= self.current_term:
+                # if the leader is not out of date...
+                if msg["term"] >= self.current_term:
+                    # update follower information accordingly
                     self.leader = msg["leader"]
-                    self.current_term = msg["current_term"]
+                    self.current_term = msg["term"]
                     self.voted = False
                     self.latest_update = curr_time
+
+                    if msg["entries"]:
+                        # self.log = self.log[]     # overwrite any entries not found in leader's log
+                        self.log.append(list(msg["entries"]))
+
+                        response = self.init_msg(msg["src"], "append_entry_reponse")
+                        response["MID"] = msg["MID"]
+                        self.send(response)
+
+
+
+
                 # if the new leader has an outdated term, reject the append entry and
                 # inform it of the proper leader
                 else:
@@ -141,43 +155,55 @@ class Replica:
             msg = self.unprocessed_msgs.pop(0)
 
             if msg["type"] == "put":
-                self.kvstore[msg["key"]] = msg["value"]
-                response = self.init_msg(msg["src"], "ok")
-                response["MID"] = msg["MID"]
-                self.send(response)
-                continue
+                if not self.unconfirmed_put:
+                    self.log.append({"term": self.current_term, "MID": msg["MID"], "key": msg["key"], "value": msg["value"], "index": len(self.log) - 1})
+                else:
+                    backlog.append(msg)
+                
 
             elif msg["type"] == "get":
-                val = self.kvstore.get(msg["key"])
-
-                if val:
-                    response = self.init_msg(msg["src"], "ok")
-                    response["value"] = val
-                else:
-                    response = self.init_msg(msg["src"], "fail")
-
+                val = self.kvstore.get(msg["key"], "")
+                
+                response = self.init_msg(msg["src"], "ok")
+                response["value"] = val
                 response["MID"] = msg["MID"]
                 self.send(response)
-                continue
 
             elif msg["type"] == "append_entry":
-                if msg["current_term"] > self.current_term:
-                    self.follow(msg["leader"], curr_time, msg["current_term"])
+                if msg["term"] > self.current_term:
+                    self.follow(msg["leader"], curr_time, msg["term"])
                 # else, make sure everyone knows we are still the leader
                 # NOTE: maybe change later depending on efficiency
                 else:
                     append_entry = self.init_msg("FFFF", "append_entry")
-                    append_entry["current_term"] = self.current_term
+                    append_entry["term"] = self.current_term
                     self.send(append_entry)
 
 
             elif msg["type"] == "request_vote":
                 # if our current term is outdated, step down as leader
-                if msg["current_term"] > self.current_term:
+                if msg["term"] > self.current_term:
                     pass
                 # otherwise, reject the vote request
                 else:
                     pass
+
+            elif msg["type"] == "append_entry_response":
+                if self.unconfirmed_put and msg["MID"] == self.unconfirmed_put["MID"]:
+                    self.confirmed_puts.add(msg["src"])
+
+                    if len(self.confirmed_puts) >= math.ceil(len(self.others) / 2.0):
+                        self.kvstore[msg["key"]] = msg["value"]
+
+                        self.unconfirmed_put.clear()
+                        self.confirmed_puts.clear()
+
+                        response = self.init_msg(msg["src"], "ok")
+                        response["MID"] = msg["MID"]
+                        self.send(response)
+
+
+                
 
     
     def candidate_func(self):
@@ -188,26 +214,25 @@ class Replica:
 
             if msg["type"] == "append_entry":
                 # if our term is outdated, back out of election and follow
-                if msg["current_term"] >= self.current_term:
-                    self.follow(msg["leader"], curr_time, msg["current_term"])
+                if msg["term"] >= self.current_term:
+                    self.follow(msg["leader"], curr_time, msg["term"])
                 # reject the append entry, respond with candidacy?
                 else:
                     pass
 
             
             elif msg["type"] == "vote":
-                if msg["current_term"] == self.current_term:
+                if msg["term"] == self.current_term:
                     self.votes += 1
-                    
-                    if self.votes >= math.ceil(len(self.others)/2):
+                        
+                    if self.votes > math.ceil(len(self.others)/2):
                         self.leader = self.id
                         append_entry = self.init_msg("FFFF", "append_entry")
-                        append_entry["current_term"] = self.current_term
+                        append_entry["term"] = self.current_term
                         self.send(append_entry)
                         self.state = LEADER
-                        continue
                 # back out of election
-                if msg["current_term"] > self.current_term:
+                elif msg["term"] > self.current_term:
                     pass
 
             # depending on current_term, either reject vote or step down and vote
@@ -223,7 +248,7 @@ class Replica:
         self.latest_update = time.time()
 
         request_vote = self.init_msg("FFFF", "request_vote")
-        request_vote["current_term"] = self.current_term
+        request_vote["term"] = self.current_term
 
         self.send(request_vote)
 
@@ -233,7 +258,9 @@ class Replica:
 
             if self.state is LEADER and time.time() > self.latest_update + 0.1:
                 heartbeat = self.init_msg("FFFF", "append_entry")
-                heartbeat["current_term"] = self.current_term
+                heartbeat["term"] = self.current_term
+                ##################################################################### THIS IS WHERE I STOPPED
+                # heartbeat["entries"] = self.log[]
                 self.send(heartbeat)
                 self.latest_update = time.time()
 
