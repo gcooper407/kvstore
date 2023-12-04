@@ -77,6 +77,23 @@ class Replica:
         }
         return response
 
+    def take_lead(self):
+        self.state = LEADER
+        self.leader = self.id
+        self.votes = 0
+
+        for rep in self.others:
+            self.next_index[rep] = len(self.log)
+            self.match_index[rep] = 0
+
+        append_entry = self.init_msg(BROADCAST, "append_entry")
+        append_entry["term"] = self.current_term
+        append_entry["prev_log_index"] = 0
+        append_entry["prev_log_term"] = 0
+        append_entry["entries"] = []
+        append_entry["leader_commit"] = self.commit_index
+        self.send(append_entry)
+
     def follow(self, leader, curr_time, term):
         self.state = FOLLOWER
         self.leader = leader
@@ -87,23 +104,6 @@ class Replica:
         self.votes = 0
         self.timeout = self.new_timeout()
         self.latest_update = curr_time
-
-    def take_lead(self):
-        self.state = LEADER
-        self.leader = self.id
-        self.votes = 0
-
-        for rep in self.others:
-            self.next_index[rep] = len(self.log)
-            self.match_index[rep] = 0
-
-            append_entry = self.init_msg(rep, "append_entry")
-            append_entry["term"] = self.current_term
-            append_entry["prev_log_index"] = 0
-            append_entry["prev_log_term"] = 0
-            append_entry["entries"] = []
-            append_entry["leader_commit"] = self.commit_index
-            self.send(append_entry)
 
 
     def follower_func(self):
@@ -166,12 +166,12 @@ class Replica:
                         self.send(response)
 
                     if msg["leader_commit"] > self.commit_index:
-                        self.commit_index = min(msg["leader_commit"], len(self.log) - 1)
+                        self.commit_index = min(msg["leader_commit"], self.last_applied) # , len(self.log) - 1
 
                         while self.commit_index > self.last_applied:
                             self.last_applied += 1
-                            self.kvstore[self.log[self.last_applied]["key"]] = self.log[self.last_applied]["value"]
-
+                            last_applied = self.log[self.last_applied]
+                            self.kvstore.update({last_applied["key"]: last_applied["value"]})
 
                 # if the new leader has an outdated term, reject the append entry and
                 # inform it of the proper leader
@@ -184,7 +184,6 @@ class Replica:
 
         self.unprocessed_msgs = backlog
 
-
     def leader_func(self):
         backlog = []
         curr_time = time.time()
@@ -195,7 +194,7 @@ class Replica:
             if msg["type"] == "put":
                 # if there's no put that has yet to be committed:
                 if not self.unconfirmed_put:
-                    self.log.append({"client": msg["src"], "term": self.current_term,
+                    self.log.append({"src": msg["src"], "term": self.current_term,
                                      "MID": msg["MID"], "key": msg["key"], 
                                      "value": msg["value"]}) # , "index": len(self.log) + 1
                     self.unconfirmed_put = msg
@@ -254,10 +253,7 @@ class Replica:
                         self.quorum.add(msg["src"])
 
                         if len(self.quorum) > len(self.others) / 2:
-                            # self.kvstore[msg["key"]] = msg["value"]
-
                             self.commit_index = len(self.log) - 1
-
                             self.unconfirmed_put.clear()
                             self.quorum.clear()
 
@@ -272,13 +268,12 @@ class Replica:
 
             while self.commit_index > self.last_applied:
                 self.last_applied += 1
-                self.kvstore[self.log[self.last_applied]["key"]] = self.log[self.last_applied]["value"]
+                last_applied = self.log[self.last_applied]
+                self.kvstore.update({last_applied["key"]: last_applied["value"]})
 
-                response = self.init_msg(self.log[self.last_applied]["client"], "ok")
-                response["MID"] = self.log[self.last_applied]["MID"]
+                response = self.init_msg(last_applied["src"], "ok")
+                response["MID"] = last_applied["MID"]
                 self.send(response)
-
-
 
     def candidate_func(self):
         curr_time = time.time()
@@ -309,7 +304,6 @@ class Replica:
             elif msg["type"] == "request_vote":
                 pass
 
-
     def start_election(self):
         self.state = CANDIDATE
         self.current_term += 1
@@ -334,7 +328,7 @@ class Replica:
                     append_entry["term"] = self.current_term
                     append_entry["prev_log_index"] = self.next_index[rep] - 1
                     append_entry["prev_log_term"] = self.log[self.next_index[rep] - 1]["term"]
-                    append_entry["entries"] = [] if self.next_index[rep] >= len(self.log) else self.log[self.next_index[rep]:]
+                    append_entry["entries"] = self.log[self.next_index[rep]:] if len(self.log) - 1 >= self.next_index[rep] else []
                     append_entry["leader_commit"] = self.commit_index
                     if self.unconfirmed_put:
                         append_entry["put_MID"] = self.unconfirmed_put["MID"]
