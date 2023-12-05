@@ -14,6 +14,8 @@ class Replica:
         self.id = id
         self.others = others
 
+        self.num_puts = 0
+
         self.state = FOLLOWER
         self.leader = "FFFF"
 
@@ -34,8 +36,13 @@ class Replica:
 
         self.unprocessed_msgs = []
 
+        self.client_buffer = []
+        self.peer_buffer = []
+
         self.latest_update = time.time()
         self.timeout = self.new_timeout()
+
+        self.latest_rep_update = {}
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -46,7 +53,7 @@ class Replica:
         print("Sent hello message: %s" % hello, flush=True)
 
     def new_timeout(self):
-        return random.uniform(0.15,0.3)
+        return random.uniform(0.75,1.0)
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
@@ -82,9 +89,12 @@ class Replica:
         self.leader = self.id
         self.votes = 0
 
+        curr_time = time.time()
+
         for rep in self.others:
             self.next_index[rep] = len(self.log)
             self.match_index[rep] = 0
+            self.latest_rep_update[rep] = curr_time
 
         append_entry = self.init_msg(BROADCAST, "append_entry")
         append_entry["term"] = self.current_term
@@ -92,7 +102,7 @@ class Replica:
         append_entry["prev_log_term"] = 0
         append_entry["entries"] = []
         append_entry["leader_commit"] = self.commit_index
-        self.send(append_entry)
+        self.peer_buffer.append(append_entry)
 
     def follow(self, leader, curr_time, term):
         self.state = FOLLOWER
@@ -104,12 +114,12 @@ class Replica:
         self.votes = 0
         self.timeout = self.new_timeout()
         self.latest_update = curr_time
+        self.latest_rep_update = {}
 
 
     def follower_func(self):
 
         backlog = []
-
         curr_time = time.time()
 
         while self.unprocessed_msgs:
@@ -119,7 +129,7 @@ class Replica:
                 if self.leader != "FFFF":
                     response = self.init_msg(msg["src"], "redirect")
                     response["MID"] = msg["MID"]
-                    self.send(response)
+                    self.client_buffer.append(response)
                 else:
                     backlog.append(msg)
 
@@ -135,7 +145,7 @@ class Replica:
                         self.latest_update = curr_time
                         self.timeout = self.new_timeout()
 
-                        self.send(response)
+                        self.peer_buffer.append(response)
                     # already voted, send a vote denial
                     else:
                         pass
@@ -163,10 +173,10 @@ class Replica:
                         response["success"] = True
                         response["next_index"] = len(self.log)
                         response["put_MID"] = msg["put_MID"]
-                        self.send(response)
+                        self.peer_buffer.append(response)
 
                     if msg["leader_commit"] > self.commit_index:
-                        self.commit_index = min(msg["leader_commit"], self.last_applied) # , len(self.log) - 1
+                        self.commit_index = min(msg["leader_commit"], len(self.log) - 1) # , len(self.log) - 1
 
                         while self.commit_index > self.last_applied:
                             self.last_applied += 1
@@ -180,7 +190,7 @@ class Replica:
                     response["term"] = self.current_term
                     response["success"] = False
                     response["next_index"] = self.commit_index
-                    self.send(response)
+                    self.peer_buffer.append(response)
 
         self.unprocessed_msgs = backlog
 
@@ -194,11 +204,12 @@ class Replica:
             if msg["type"] == "put":
                 # if there's no put that has yet to be committed:
                 if not self.unconfirmed_put:
-                    self.log.append({"src": msg["src"], "term": self.current_term,
+                    self.log.append({"client": msg["src"], "term": self.current_term,
                                      "MID": msg["MID"], "key": msg["key"], 
                                      "value": msg["value"]}) # , "index": len(self.log) + 1
                     self.unconfirmed_put = msg
                     self.quorum.add(self.id)
+                    self.num_puts += 1
                 else:
                     backlog.append(msg)
 
@@ -209,7 +220,7 @@ class Replica:
                 response = self.init_msg(msg["src"], "ok")
                 response["value"] = val
                 response["MID"] = msg["MID"]
-                self.send(response)
+                self.client_buffer.append(response)
 
             elif msg["type"] == "append_entry":
                 if msg["term"] > self.current_term:
@@ -225,7 +236,7 @@ class Replica:
                     append_entry = self.init_msg(msg["src"], "append_entry_response")
                     append_entry["term"] = self.current_term
                     append_entry["success"] = False
-                    self.send(append_entry)
+                    self.peer_buffer.append(response)
 
 
             elif msg["type"] == "request_vote":
@@ -237,15 +248,7 @@ class Replica:
                     pass
 
             elif msg["type"] == "append_entry_response":
-                if not msg["success"]:
-                    if self.current_term < msg["term"]:
-                        # response = self.init_msg(self.unconfirmed_put["src"], "redirect")
-                        # response["MID"] = self.unconfirmed_put["MID"]
-                        # self.send(response)
-
-                        self.follow(msg["leader"], curr_time, msg["term"])
-                        # return self.follower_func()
-                else:
+                if msg["success"]:
                     self.next_index[msg["src"]] = min(msg["next_index"], len(self.log))
                     self.match_index[msg["src"]] = self.next_index[msg["src"]] - 1
 
@@ -256,10 +259,18 @@ class Replica:
                             self.commit_index = len(self.log) - 1
                             self.unconfirmed_put.clear()
                             self.quorum.clear()
+                else:
+                    if self.current_term < msg["term"]:
+                        # response = self.init_msg(self.unconfirmed_put["src"], "redirect")
+                        # response["MID"] = self.unconfirmed_put["MID"]
+                        # self.send(response)
+
+                        self.follow(msg["leader"], curr_time, msg["term"])
+                        # return self.follower_func()
 
 
             for n in range(self.commit_index + 1, len(self.log)):
-                if (len(list(filter(lambda i: self.match_index[i] >= n, self.match_index)))
+                if (len(list(filter(lambda i: self.match_index[i] >= n, self.others)))
                     > len(self.match_index) / 2):
                     if self.log[n]["term"] == self.current_term:
                         self.commit_index = n
@@ -268,12 +279,14 @@ class Replica:
 
             while self.commit_index > self.last_applied:
                 self.last_applied += 1
-                last_applied = self.log[self.last_applied]
-                self.kvstore.update({last_applied["key"]: last_applied["value"]})
+                last_app = self.log[self.last_applied]
+                self.kvstore.update({last_app["key"]: last_app["value"]})
 
-                response = self.init_msg(last_applied["src"], "ok")
-                response["MID"] = last_applied["MID"]
-                self.send(response)
+                response = self.init_msg(last_app["client"], "ok")
+                response["MID"] = last_app["MID"]
+                self.client_buffer.append(response)
+        
+        self.unprocessed_msgs = backlog
 
     def candidate_func(self):
         curr_time = time.time()
@@ -316,24 +329,37 @@ class Replica:
         request_vote["last_log_index"] = len(self.log) - 1
         request_vote["last_log_term"] = self.log[-1]["term"]
 
-        self.send(request_vote)
+        self.peer_buffer.append(request_vote)
 
+    def append_entry(self, rep, entries):
+        append_entry = self.init_msg(rep, "append_entry")
+        append_entry["term"] = self.current_term
+        append_entry["prev_log_index"] = self.next_index[rep] - 1
+        append_entry["prev_log_term"] = self.log[self.next_index[rep] - 1]["term"]
+        append_entry["entries"] = entries
+        append_entry["leader_commit"] = self.commit_index
+        append_entry["num_puts"] = self.num_puts
+        if self.unconfirmed_put:
+            append_entry["put_MID"] = self.unconfirmed_put["MID"]
+        return append_entry
 
     def run(self):
         while True:
+            while self.client_buffer:
+                self.send(self.client_buffer.pop(0))
 
-            if self.state is LEADER and time.time() > self.latest_update + 0.1:
+            while self.peer_buffer:
+                self.send(self.peer_buffer.pop(0))
+
+
+            if self.state is LEADER:
                 for rep in self.others:
-                    append_entry = self.init_msg(rep, "append_entry")
-                    append_entry["term"] = self.current_term
-                    append_entry["prev_log_index"] = self.next_index[rep] - 1
-                    append_entry["prev_log_term"] = self.log[self.next_index[rep] - 1]["term"]
-                    append_entry["entries"] = self.log[self.next_index[rep]:] if len(self.log) - 1 >= self.next_index[rep] else []
-                    append_entry["leader_commit"] = self.commit_index
-                    if self.unconfirmed_put:
-                        append_entry["put_MID"] = self.unconfirmed_put["MID"]
-                    self.send(append_entry)
-                self.latest_update = time.time()
+                    if (len(self.log) - 1 >= self.next_index[rep]) and (time.time() > self.latest_rep_update[rep] + 0.0025):
+                        self.send(self.append_entry(rep, self.log[self.next_index[rep]:]))
+                        self.latest_rep_update[rep] = time.time()
+                    elif time.time() > self.latest_rep_update[rep] + 0.5:
+                        self.send(self.append_entry(rep, []))
+                        self.latest_rep_update[rep] = time.time()
 
             self.receive_all()
 
