@@ -8,6 +8,29 @@ FOLLOWER = "follower"
 CANDIDATE = "candidate"
 LEADER = "leader"
 
+# Message types
+VOTE = "vote"
+RVTE = "request_vote"
+AENT = "append_entry"
+ARES = "append_entry_response"
+
+# Message fields
+TERM = "term"
+LDID = "leader_id"
+PIDX = "prev_log_index"
+PTRM = "prev_log_term"
+ENTR = "entries"
+SCS = "success"
+SRC = "src"
+
+
+LIDX = "last_log_index"
+LTRM = "last_log_term"
+
+LDRC = "leader_commit"
+
+NPUT = "num_puts"
+
 class Replica:
     def __init__(self, port, id, others):
         # TODO briefly explain fields (based on groups)
@@ -49,18 +72,34 @@ class Replica:
         self.socket.bind(('localhost', 0))
 
         print("Replica %s starting up" % self.id, flush=True)
-        hello = { "src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello" }
+        hello = {"src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello"}
         self.send(hello)
         print("Sent hello message: %s" % hello, flush=True)
 
     def new_timeout(self):
-        return random.uniform(0.5,0.65)
+        """
+        Sets the random timeout for when actions have to take place
+
+        :return: A float representing the timeout
+        """
+        return random.uniform(0.5, 0.65)
 
     def send(self, message):
+        """
+        Sends a message to the intended target
+
+        :param message: Message to be sent
+        :return:        None
+        """
         msg = json.dumps(message).encode('utf-8')
         self.socket.sendto(msg, ('localhost', self.port))
 
     def receive_all(self):
+        """
+        Receive from messages from the client/replicas
+
+        :return: None
+        """
         while True:
             msg = self.recv_msg()
             if msg:
@@ -70,6 +109,11 @@ class Replica:
                 return
 
     def recv_msg(self):
+        """
+        Receives a single message from the client/replicas/server
+
+        :return: None
+        """
         ready_for_reading = select.select([self.socket], [], [], 0.0001)[0]
         if self.socket in ready_for_reading:
             raw_msg = self.socket.recv(65535)
@@ -77,17 +121,30 @@ class Replica:
                 return json.loads(raw_msg.decode('utf-8'))
         return None
 
-    def init_msg(self, dst, type):
+    def init_msg(self, dst, msg_type):
+        """
+        Creates the base template for a message
+
+        :param dst:         Where the message will be sent
+        :param msg_type:    The type of message it is
+        :return:            The template message
+        """
         response = {
             "src": self.id,
             "dst": dst,
             "leader": self.leader,
-            "type": type
+            "type": msg_type
         }
         return response
 
     def take_lead(self):
-        # TODO briefly explain how a replica takes the lead
+        """
+        Sets up the prerequisite for becoming a leader. This should be done
+        after a candidate has received the necessary votes to become leader.
+
+        :return:    None
+        """
+
         self.state = LEADER
         self.leader = self.id
         self.votes = 0
@@ -108,7 +165,16 @@ class Replica:
         self.peer_reponse_queue.append(append_entry)
 
     def follow(self, leader, curr_time, term):
-        # TODO briefly explain how a replica becomes a leader
+        """
+        Sets up the prerequisites once a replica becomes a follower.
+        Additionally, resets parameters that were used for leader functions.
+
+        :param leader:      The new leader
+        :param curr_time:   The time it is at the calling of the function
+        :param term:        The term of the new leader
+        :return:            None
+        """
+
         self.state = FOLLOWER
         self.leader = leader
         self.current_term = term
@@ -120,29 +186,36 @@ class Replica:
         self.latest_update = curr_time
         self.latest_rep_update = {}
 
-
     def follower_func(self):
+        """
+        Contains all the necessary logic for a follower
+
+        :return:    None
+        """
+
         backlog = []
         curr_time = time.time()
 
+        # messages to go through and process
         while self.unprocessed_msgs:
             msg = self.unprocessed_msgs.pop(0)
-
+            # if the message is a get/put
             if msg["type"] in ["get", "put"]:
+                # of the current leader is not unknown
                 if self.leader != "FFFF":
                     response = self.init_msg(msg["src"], "redirect")
                     response["MID"] = msg["MID"]
                     self.client_reponse_queue.append(response)
                 else:
                     backlog.append(msg)
-
-            elif msg["type"] == "request_vote":
-                # if our/their log is up to date...
+            # if the message is a vote request
+            elif msg["type"] == RVTE:
+                # if our/their log is up-to-date...
                 if msg["last_log_index"] >= len(self.log) - 1:
                     # if we are either in the same term & have not yet voted OR
                     # we are in a previous term (indicating new round of elections), send a vote
                     if ((msg["term"] == self.current_term and not self.voted) or
-                        msg["term"] > self.current_term):
+                            msg["term"] > self.current_term):
                         # self.leader = "FFFF"
                         self.current_term = msg["term"]
                         self.voted = True
@@ -158,14 +231,13 @@ class Replica:
                 # vote request is for outdated term
                 else:
                     pass
-
-
-            elif msg["type"] == "append_entry":
+            # if a message is an append entry
+            elif msg["type"] == AENT:
                 # check for consistency
                 if (msg["term"] >= self.current_term and
-                    msg["prev_log_index"] < len(self.log) and
-                    msg["prev_log_term"] == self.log[msg["prev_log_index"]]["term"]):
-                    
+                        msg["prev_log_index"] < len(self.log) and
+                        msg["prev_log_term"] == self.log[msg["prev_log_index"]]["term"]):
+
                     # update follower information accordingly
                     self.leader = msg["leader"]
                     self.current_term = msg["term"]
@@ -175,7 +247,7 @@ class Replica:
                     # if there are updates for the log
                     if msg["entries"]:
                         # remove any entries not found in leader's log + add new entries
-                        self.log = self.log[:msg["prev_log_index"]+1] + msg["entries"]
+                        self.log = self.log[:msg["prev_log_index"] + 1] + msg["entries"]
 
                         response = self.init_msg(msg["src"], "append_entry_response")
                         response["term"] = self.current_term
@@ -204,25 +276,33 @@ class Replica:
         self.unprocessed_msgs = backlog
 
     def leader_func(self):
+        """
+        Contains all the necessary logic for a leader.
+
+        :return: None
+        """
         backlog = []
-        curr_time = time.time()
+        curr_time = time.time() # updating our current time
 
         while self.unprocessed_msgs:
             msg = self.unprocessed_msgs.pop(0)
 
+            # if the message is a put
             if msg["type"] == "put":
                 # if there's no put that has yet to be committed:
                 if not self.staged_put:
                     self.log.append({"client": msg["src"], "term": self.current_term,
-                                     "put_ID": msg["MID"], "key": msg["key"], 
+                                     "put_ID": msg["MID"], "key": msg["key"],
                                      "value": msg["value"]})
                     self.staged_put = msg
                     self.quorum.add(self.id)
                     self.num_puts += 1
                 else:
+                    # otherwise, we cannot handle it right now,
+                    # add to a backlog to handle later
                     backlog.append(msg)
 
-
+            # if the message the leader receives is a get
             elif msg["type"] == "get":
                 val = self.kvstore.get(msg["key"], "")
 
@@ -230,7 +310,7 @@ class Replica:
                 response["value"] = val
                 response["MID"] = msg["MID"]
                 self.client_reponse_queue.append(response)
-
+            # if the message received is an append entry
             elif msg["type"] == "append_entry":
                 # if our term is outdated, step down as leader and convert to follower
                 # (take all previous, current, and future messages and process them as a follower)
@@ -245,9 +325,8 @@ class Replica:
                     response["term"] = self.current_term
                     response["success"] = False
                     self.peer_reponse_queue.append(response)
-                    
-
-            elif msg["type"] == "request_vote":
+            # if the message received is a vote request
+            elif msg["type"] == RVTE:
                 # if our current term is outdated and the other replica's log is further along
                 # than our own, step down as leader and convert to follower
                 # (take all previous, current, and future messages and process them as a follower)
@@ -283,9 +362,6 @@ class Replica:
                 # to take the append_entry_response, since followers have no use for it))
                 else:
                     if msg["term"] > self.current_term:
-                        # response = self.init_msg(self.staged_put["src"], "redirect")
-                        # response["MID"] = self.staged_put["MID"]
-                        # self.send(response)
                         self.follow(msg["leader"], curr_time, msg["term"])
                         self.unprocessed_msgs = backlog + self.unprocessed_msgs
                         return self.follower_func()
@@ -294,29 +370,37 @@ class Replica:
                     else:
                         self.next_index[msg["src"]] = msg["next_index"]
 
-            # TODO: explain
+            # Updating commit index based on the conditions found in the
+            # RAFT paper pg.4 (sections 5.3 and 5.4)
             for n in range(self.commit_index + 1, len(self.log)):
                 if (len(list(filter(lambda i: self.match_index[i] >= n, self.match_index)))
-                    > len(self.match_index) / 2):
-                    if self.log[n]["term"] == self.current_term:
+                        > len(self.match_index) / 2):
+                    if self.log[n][TERM] == self.current_term:
                         self.commit_index = n
                 else:
                     break
 
-            # TODO: explain
+            # if there are any puts that have not been applied yet, apply them
             while self.commit_index > self.last_applied:
-                self.last_applied += 1
-                last_app = self.log[self.last_applied]
-                self.kvstore.update({last_app["key"]: last_app["value"]})
+                self.last_applied += 1                      # increment the counter
+                last_app = self.log[self.last_applied]      # get that log to apply
+                self.kvstore.update({last_app["key"]: last_app["value"]})   # add it to our state machine
 
+                # send back a message to the client saying we've applied the put
                 response = self.init_msg(last_app["client"], "ok")
                 response["MID"] = last_app["put_ID"]
                 self.client_reponse_queue.append(response)
-        
+
         self.unprocessed_msgs = backlog
 
     def candidate_func(self):
-        backlog = []
+        """
+        Contains all the necessary logic for a candidate
+
+        :return:    None
+        """
+
+        backlog = []    # represents messages that we have not gotten to yet as we cannot process them at this moment
         curr_time = time.time()
 
         while self.unprocessed_msgs:
@@ -325,23 +409,23 @@ class Replica:
             if msg["type"] in ["get", "put"]:
                 backlog.append(msg)
 
-            elif msg["type"] == "append_entry":
+            elif msg["type"] == AENT:
                 # if our current term is outdated, back out of election and convert to follower
                 # (take all previous, current, and future messages and process them as a follower)
-                if msg["term"] >= self.current_term:
-                    self.follow(msg["leader"], curr_time, msg["term"])
+                if msg[TERM] >= self.current_term:
+                    self.follow(msg[LEADER], curr_time, msg[TERM])
                     self.unprocessed_msgs = backlog + [msg] + self.unprocessed_msgs
                     return self.follower_func()
                 # reject the append entry, respond with candidacy?
                 else:
-                    response = self.init_msg(msg["src"], "append_entry_response")
-                    response["success"] = False
-                    response["term"] = self.current_term
+                    response = self.init_msg(msg["src"], ARES)
+                    response[SCS] = False
+                    response[TERM] = self.current_term
                     self.peer_reponse_queue.append(response)
 
-            elif msg["type"] == "vote":
+            elif msg[TERM] == VOTE:
                 # if the vote is for the correct term (our current term)
-                if msg["term"] == self.current_term:
+                if msg[TERM] == self.current_term:
                     self.votes += 1
 
                     # if we win the election, step up as leader
@@ -352,50 +436,70 @@ class Replica:
                         self.unprocessed_msgs = backlog + self.unprocessed_msgs
                         return self.leader_func()
                 # otherwise, our term is out of date
-                # TODO it works as is? but potentially change it to back out of election,
-                # see how that affects things
-                elif msg["term"] > self.current_term:
+                elif msg[TERM] > self.current_term:
                     pass
 
-            elif msg["type"] == "request_vote":
+            elif msg["type"] == RVTE:
                 # if our current term is outdated, back out of election and convert to follower
                 # (take all previous, current, and future messages and process them as a follower)
-                if msg["term"] > self.current_term:
-                    self.follow(msg["leader"], curr_time, msg["term"])
+                if msg[TERM] > self.current_term:
+                    self.follow(msg[LEADER], curr_time, msg[TERM])
                     self.unprocessed_msgs = backlog + [msg] + self.unprocessed_msgs
                     return self.follower_func()
 
         self.unprocessed_msgs = backlog
 
     def start_election(self):
-        # TODO briefly explain election
-        self.state = CANDIDATE
-        self.current_term += 1
-        self.votes = 1
+        """
+        Once a pre-determined timeout has been hit, a follower may start an
+        election.
+
+        :return:    None
+        """
+
+        self.state = CANDIDATE          # set owns state to candidate
+        self.current_term += 1          # increase term
+        self.votes = 1                  # vote for itself
 
         self.latest_update = time.time()
 
-        request_vote = self.init_msg("FFFF", "request_vote")
-        request_vote["term"] = self.current_term
-        request_vote["last_log_index"] = len(self.log) - 1
-        request_vote["last_log_term"] = self.log[-1]["term"]
+        request_vote = self.init_msg(dst=BROADCAST, msg_type=RVTE)  # initial vote request template
+        request_vote[TERM] = self.current_term      # the candidate's current term
+        request_vote[LIDX] = len(self.log) - 1      # the index of its latest log entry
+        request_vote[LTRM] = self.log[-1][TERM]     # the term of its latest log entry
 
         self.peer_reponse_queue.append(request_vote)
 
     def append_entry(self, rep, entries):
-        # TODO briefly explain the fields
-        append_entry = self.init_msg(rep, "append_entry")
-        append_entry["term"] = self.current_term
-        append_entry["prev_log_index"] = self.next_index[rep] - 1
-        append_entry["prev_log_term"] = self.log[self.next_index[rep] - 1]["term"]
-        append_entry["entries"] = entries[:7]
-        append_entry["leader_commit"] = self.commit_index
-        append_entry["num_puts"] = self.num_puts
+        """
+        Sets up an append entry to send to replicas either letting them know
+        that it is still alive, or with new entries to input into a replica's
+        logs.
+
+        :param rep:         The replica to send it to
+        :param entries:     Entries to add. If empty, this would be a heartbeat
+        :return:            The entry
+        """
+
+        append_entry = self.init_msg(dst=rep, msg_type=AENT)    # prepares initial template
+        append_entry[TERM] = self.current_term                  # the term of the leader
+        append_entry[PIDX] = self.next_index[rep] - 1           # index of the last log entry
+        append_entry[PTRM] = self.log[self.next_index[rep] - 1][TERM]   # term of the last log entry
+        append_entry[ENTR] = entries[:7]                        # the log entries to send
+        append_entry[LDRC] = self.commit_index                  # the last committed entry
+        append_entry[NPUT] = self.num_puts                      # the index of the puts
+        # if we are ready to send a put
         if self.staged_put:
             append_entry["put_ID"] = self.staged_put["MID"]
         return append_entry
 
     def run(self):
+        """
+        Primary command center of the program
+
+        :return:    None
+        """
+
         while True:
             # respond to clients ASAP
             while self.client_reponse_queue:
@@ -405,14 +509,20 @@ class Replica:
             while self.peer_reponse_queue:
                 self.send(self.peer_reponse_queue.pop(0))
 
-            # send updates/heartbeats ASAP
-            # TODO explain this a bit more
+            # as soon as we have an update for other replicas, send it ASAP
+            # otherwise, wait till right before the first possible timeout on
+            # each replica, and send a heartbeat.
             if self.state is LEADER:
+                # loop through each replica
                 for rep in self.others:
-                    if (len(self.log) - 1 >= self.next_index[rep]) and (time.time() > self.latest_rep_update[rep]["sent"] + self.latest_rep_update[rep]["timeout"]):
+                    # if there are updates to send, send them
+                    if (len(self.log) - 1 >= self.next_index[rep]) and (
+                            time.time() > self.latest_rep_update[rep]["sent"] + self.latest_rep_update[rep]["timeout"]):
                         self.send(self.append_entry(rep, self.log[self.next_index[rep]:]))
                         self.latest_rep_update[rep]["sent"] = time.time()
                         self.latest_rep_update[rep]["timeout"] = 0.1
+                    # otherwise, send a heartbeat if we haven't sent anything
+                    # in over 0.45 seconds
                     elif time.time() > self.latest_rep_update[rep]["sent"] + 0.45:
                         self.send(self.append_entry(rep, []))
                         self.latest_rep_update[rep]["sent"] = time.time()
@@ -430,10 +540,11 @@ class Replica:
 
             # if we're not a leader, we reach election timeout (no message from leader in awhile),
             # and we haven't yet voted in an election currently going on, start a new election
-            if (self.state is not LEADER and 
-                time.time() > self.latest_update + self.timeout and 
-                not self.voted):
+            if (self.state is not LEADER and
+                    time.time() > self.latest_update + self.timeout and
+                    not self.voted):
                 self.start_election()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
