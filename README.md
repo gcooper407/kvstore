@@ -61,4 +61,3 @@ time we would run the simple tests fairly regularly to ensure that the
 changes we were making did not break the program. Then later on, if running 
 an advanced test succeeded, we could be fairly certain the core 
 functionality of the kv store was working.
->>>>>>> r1remote/main
