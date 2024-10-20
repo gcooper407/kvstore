@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# kvstore
-=======
 # Distributed Key-Value Database
 ## High-Level Approach
 At a high level, this program runs entirely within a single while loop. On 
