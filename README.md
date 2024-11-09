@@ -12,7 +12,7 @@ For candidates and leaders, it is much the same, just with slightly
 different parameters and checks.
 ## Challenges
 ### Getting started
-Due to the nature of this assignment, it was pretty difficult to get started.
+Due to the complex nature of the RAFT protocol, it was pretty difficult to get started.
 This was mainly just due to understanding the complex RAFT protocol and 
 devising a way to implement that in python. The following links guided a 
 majority of the final implementation: [Rutgers](https://people.cs.rutgers.edu/~pxk/417/notes/raft.html) and 
